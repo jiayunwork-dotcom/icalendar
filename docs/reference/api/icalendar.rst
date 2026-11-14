@@ -9,6 +9,7 @@ Subpackages
 
    icalendar.attr
    icalendar.cal
+   icalendar.expansion
    icalendar.parser
    icalendar.prop
    icalendar.timezone

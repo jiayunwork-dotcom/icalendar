@@ -1,0 +1,1 @@
+Add :meth:`Calendar.expand_events <icalendar.Calendar.expand_events>` and the public :class:`~icalendar.Occurrence` record to expand recurring ``VEVENT`` components (RRULE/RDATE/EXDATE plus RECURRENCE-ID exceptions) into concrete, windowed occurrences with RFC 5545 DST semantics, nominal-vs-exact DURATION handling and full structural validation.

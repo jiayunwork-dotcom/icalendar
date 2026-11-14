@@ -25,6 +25,56 @@ DURATION_REGEX = re.compile(
 XCAL_DURATION_ERROR = "Expected duration format https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.6"
 
 
+def _duration_text_is_nominal(text: str) -> bool:
+    """Whether a DURATION string uses a day/week (nominal) component.
+
+    Per :rfc:`5545#section-3.3.6`, a day or week duration is nominal calendar
+    arithmetic, while an hour/minute/second-only duration is an exact offset.
+    The check looks only at the part before the ``T`` separator so that a
+    time designator such as ``D`` cannot be mistaken for a day.
+    """
+    upper = text.upper()
+    date_part = upper.split("T", 1)[0]
+    return "W" in date_part or "D" in date_part
+
+
+class NominalDuration(timedelta):
+    """A :class:`~datetime.timedelta` spelled with a day/week DURATION part.
+
+    The class behaves exactly like a timedelta for all arithmetic and
+    comparisons; it additionally records that the source DURATION used a
+    nominal (calendar day/week) component, which
+    :rfc:`5545#section-3.3.6` distinguishes from an exact hour/minute/second
+    duration across a daylight-saving discontinuity. A plain
+    :class:`~datetime.timedelta` cannot otherwise tell ``P1D`` from ``PT24H``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        # Mirror timedelta's repr so existing output/doctests are unchanged.
+        return f"datetime.timedelta({_timedelta_kwargs(self)})"
+
+    @property
+    def nominal(self) -> bool:
+        """Always :data:`True` for a nominal day/week duration."""
+        return True
+
+
+def _timedelta_kwargs(value: timedelta) -> str:
+    """Render a timedelta with the keyword arguments used in doctests."""
+    parts = []
+    if value.days:
+        parts.append(f"days={value.days}")
+    if value.seconds:
+        parts.append(f"seconds={value.seconds}")
+    if value.microseconds:
+        parts.append(f"microseconds={value.microseconds}")
+    if not parts:
+        parts.append("0")
+    return ", ".join(parts)
+
+
 class vDuration(TimeBase):
     """Duration
 
@@ -107,6 +157,11 @@ class vDuration(TimeBase):
         self.td = td
         self.params = Parameters(params)
 
+    @property
+    def nominal(self) -> bool:
+        """Whether the wrapped duration used a nominal day/week spelling."""
+        return getattr(self.td, "nominal", False)
+
     def to_ical(self) -> bytes:
         sign = ""
         td = self.td
@@ -170,6 +225,10 @@ class vDuration(TimeBase):
         if sign == "-":
             value = -value
 
+        if _duration_text_is_nominal(ical):
+            # Preserve the nominal spelling as a timedelta subclass.
+            return NominalDuration(days=value.days, seconds=value.seconds,
+                                   microseconds=value.microseconds)
         return value
 
     @property
@@ -260,4 +319,4 @@ class vDuration(TimeBase):
         return cls(td, params=params)
 
 
-__all__ = ["vDuration"]
+__all__ = ["NominalDuration", "vDuration"]

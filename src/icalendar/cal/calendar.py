@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         Todo,
     )
     from icalendar.compatibility import Self
+    from icalendar.expansion.occurrence import Occurrence
     from icalendar.parser.ical.component import ComponentIcalParser
 
 
@@ -207,6 +208,66 @@ class Calendar(Component):
         New Year's Day
         """
         return self.walk("VEVENT")
+
+    def expand_events(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        default_tz: str = "UTC",
+        max_instances: int = 10000,
+    ) -> list[Occurrence]:
+        """Expand the calendar's VEVENT components into concrete occurrences.
+
+        Recurring events are stored as definitions (a master component with an
+        ``RRULE``/``RDATE``/``EXDATE`` set) plus exception components carrying a
+        ``RECURRENCE-ID``. This method resolves those definitions into the
+        individual happenings inside a query window and merges rescheduled and
+        cancelled exceptions. Other component types (``VTODO``, ``VJOURNAL``,
+        ``VFREEBUSY`` and so on) are untouched; ``VTIMEZONE`` components keep
+        providing time-zone resolution as usual.
+
+        The selection uses the *final* start of each happening: an exception
+        moved into the window is included while the same identity moved out of
+        the window leaves no record behind. Inclusion, exclusion, cancellation
+        and exception matching all use the *original* recurrence identity.
+
+        Parameters:
+            window_start: Inclusive lower bound, as a timezone-aware
+                :class:`~datetime.datetime`. Converted to UTC internally.
+            window_end: Exclusive upper bound, as a timezone-aware
+                :class:`~datetime.datetime`. Converted to UTC internally.
+            default_tz: IANA name used to interpret floating DATE-TIME values
+                and all-day DATE boundaries. Defaults to ``"UTC"``.
+            max_instances: Maximum number of occurrences returned. Must be a
+                non-bool positive integer; exceeding it raises
+                :exc:`OverflowError` rather than truncating the result.
+
+        Returns:
+            A list of :class:`~icalendar.Occurrence` records sorted by
+            ``(start, uid, recurrence_id)`` ISO strings. An empty calendar
+            returns an empty list.
+
+        Raises:
+            ValueError: If the window, time zone or cap arguments are invalid,
+                or if any UID's components are structurally invalid, use an
+                unsupported feature, contain unparseable time properties or
+                reference unresolvable time zones. Validation runs for every
+                UID regardless of whether it has occurrences in the window.
+            OverflowError: If more than ``max_instances`` occurrences match.
+
+        See :doc:`/how-to/expand-events` for the full query semantics, identity
+        rules, supported recurrence features and failure behavior.
+        """
+        from icalendar.expansion import expand_events
+
+        return expand_events(
+            self.events,
+            window_start,
+            window_end,
+            default_tz=default_tz,
+            max_instances=max_instances,
+        )
 
     @property
     def todos(self) -> list[Todo]:

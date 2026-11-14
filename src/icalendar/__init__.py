@@ -47,6 +47,7 @@ from icalendar.error import (
     LocalTimezoneMissing,
     XCalParsingError,
 )
+from icalendar.expansion import Occurrence
 
 # Parameters and helper methods for splitting and joining string with escaped
 # chars.
@@ -144,6 +145,7 @@ __all__ = [
     "LazyCalendar",
     "LocalTimezoneMissing",
     "NFields",
+    "Occurrence",
     "Parameters",
     "Timezone",
     "TimezoneDaylight",
