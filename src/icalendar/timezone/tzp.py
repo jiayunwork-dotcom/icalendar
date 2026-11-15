@@ -134,6 +134,35 @@ class TZP:
             return dt.replace(tzinfo=None)
         return self.__provider.localize(dt, tz)
 
+    @property
+    def provider(self) -> TZProvider:
+        """The active timezone implementation, without the shared cache.
+
+        This is the backing :class:`~icalendar.timezone.provider.TZProvider`
+        (for example the :mod:`zoneinfo` or :mod:`pytz` implementation).
+        Lookups go straight to the standard timezone library and never touch
+        the cache of :class:`VTIMEZONE` components parsed from calendar data,
+        so private time zones of one calendar can never leak through here.
+        """
+        return self.__provider
+
+    def standard_timezone(self, tz_id: str) -> tzinfo | None:
+        """Resolve a standard, library-provided timezone.
+
+        In contrast to :meth:`timezone`, this never consults, and never
+        populates, the cache of :class:`VTIMEZONE` components parsed from
+        calendar data. It applies the same identifier clean-up and alias
+        rules (Windows names, globally unique ``/vendor/Name`` identifiers)
+        but only time zones the active provider itself knows can be
+        returned. Use this when a TZID must be resolved solely from the
+        standard timezone library.
+        """
+        for lookup_id, _is_global_guess in self._lookup_ids(tz_id):
+            tz = self.__provider.timezone(lookup_id)
+            if tz is not None:
+                return tz
+        return None
+
     def cache_timezone_component(self, timezone_component: Timezone) -> None:
         """Cache the timezone that is created from a timezone component
         if it is not already known.

@@ -10,6 +10,7 @@ How to guides
     upgrade
     usage
     expand-events
+    local-timezones
     parse-errors
     attendees
     custom-components

@@ -8,6 +8,7 @@ Submodules
    :maxdepth: 4
 
    icalendar.timezone.equivalent_timezone_ids
+   icalendar.timezone.local
    icalendar.timezone.provider
    icalendar.timezone.pytz
    icalendar.timezone.tzid

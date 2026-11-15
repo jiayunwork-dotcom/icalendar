@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
 
 from icalendar.attr import (
@@ -23,12 +24,12 @@ from icalendar.cal.examples import get_example
 from icalendar.cal.timezone import Timezone
 from icalendar.error import IncompleteComponent
 from icalendar.parser.ical.calendar import CalendarIcalParser
+from icalendar.timezone.local import LocalTimezoneScope
 from icalendar.version import __version__
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import date, datetime
-    from pathlib import Path
 
     from icalendar.cal import (
         Availability,
@@ -157,25 +158,55 @@ class Calendar(Component):
         return cls.from_ical(get_example("calendars", name))
 
     @classmethod
-    def _get_ical_parser(cls, st: str | bytes) -> ComponentIcalParser:
+    def _get_ical_parser(
+        cls, st: str | bytes, *, local_timezones: bool = False
+    ) -> ComponentIcalParser:
         """Get the iCal parser for the given input string."""
-        return CalendarIcalParser(st, cls._get_component_factory(), cls.types_factory)
+        scope_factory = LocalTimezoneScope if local_timezones else None
+        return CalendarIcalParser(
+            st,
+            cls._get_component_factory(),
+            cls.types_factory,
+            scope_factory=scope_factory,
+        )
 
     @overload
     @classmethod
     def from_ical(
-        cls, st: str | bytes | Path, multiple: Literal[False] = False
+        cls,
+        st: str | bytes | Path,
+        multiple: Literal[False] = False,
+        *,
+        local_timezones: Literal[False] = False,
     ) -> Calendar: ...
 
     @overload
     @classmethod
     def from_ical(
-        cls, st: str | bytes | Path, multiple: Literal[True]
+        cls,
+        st: str | bytes | Path,
+        multiple: Literal[False] = False,
+        *,
+        local_timezones: Literal[True],
+    ) -> Calendar: ...
+
+    @overload
+    @classmethod
+    def from_ical(
+        cls,
+        st: str | bytes | Path,
+        multiple: Literal[True],
+        *,
+        local_timezones: bool = False,
     ) -> list[Calendar]: ...
 
     @classmethod
-    def from_ical(
-        cls, st: str | bytes | Path, multiple: bool = False
+    def from_ical(  # type: ignore[override]
+        cls,
+        st: str | bytes | Path,
+        multiple: bool = False,
+        *,
+        local_timezones: bool = False,
     ) -> Calendar | list[Calendar]:
         """Parse iCalendar data into calendar instances.
 
@@ -183,13 +214,94 @@ class Calendar(Component):
             st: iCalendar data as bytes or string, or a path to an iCalendar file.
             multiple: If ``True``, returns a list of calendars.
                 If ``False``, returns a single calendar.
+            local_timezones: If ``True``, each ``VCALENDAR``'s ``VTIMEZONE``
+                components define time zones that are private to that
+                calendar. The same ``TZID`` can therefore carry different
+                rules in different calendars without one overriding the
+                other. A TZID without a local definition is resolved only
+                through the active standard timezone library; if it cannot
+                be resolved a :class:`ValueError` is raised. The global
+                timezone provider and its cache are never modified. If
+                ``False`` (the default), parsing behaves exactly as before.
 
         Returns:
-            Calendar or list of calendars.
+            Calendar or list of Calendars.
         """
-        return cast(
-            "Calendar | list[Calendar]", super().from_ical(st, multiple=multiple)
-        )
+        if not isinstance(local_timezones, bool):
+            raise TypeError(
+                f"local_timezones must be a bool, got {type(local_timezones).__name__}"
+            )
+        if isinstance(st, Path):
+            st = st.read_bytes()
+        parser = cls._get_ical_parser(st, local_timezones=local_timezones)
+        components = parser.parse()
+        if multiple:
+            return cast("list[Calendar]", components)
+        if len(components) > 1:
+            raise ValueError(
+                cls._format_error(
+                    "Found multiple components where only one is allowed", st
+                )
+            )
+        if len(components) < 1:
+            raise ValueError(
+                cls._format_error(
+                    "Found no components where exactly one is required", st
+                )
+            )
+        return cast("Calendar", components[0])
+
+    @property
+    def local_timezone_scope(self):
+        """The private time zone scope of this calendar, if any.
+
+        This is set only on a ``VCALENDAR`` parsed with
+        ``local_timezones=True`` (or returned by
+        :meth:`merge_ical`). It is ``None`` for ordinary parsing, in which
+        case the global :data:`~icalendar.timezone.tzp` provider is used.
+        """
+        return self._local_timezone_scope
+
+    @classmethod
+    def merge_ical(cls, sources: Iterable[str | bytes]) -> Calendar:
+        """Merge several single-calendar iCalendar sources into one calendar.
+
+        Each source is interpreted with *local* time zone semantics: its
+        ``VTIMEZONE`` components define time zones that are private to that
+        source. Two sources may therefore use the same ``TZID`` (for example
+        ``Local/Office``) with different offset and transition rules, and the
+        merged calendar keeps both meanings. Colliding private definitions are
+        emitted under unique aliases while the bound datetime values keep
+        their original UTC semantics.
+
+        Parameters:
+            sources: A non-empty, finite iterable of iCalendar strings or
+                byte strings. Each item must contain exactly one
+                ``VCALENDAR`` limited to ``VERSION:2.0``/``PRODID`` top-level
+                properties and ``VEVENT``/``VTIMEZONE`` sub-components. The
+                iterable is consumed exactly once.
+
+        Returns:
+            A new :class:`Calendar` containing all ``VTIMEZONE`` definitions
+            followed by all ``VEVENT`` components, preserving source order
+            and the event order within each source.
+
+        Raises:
+            TypeError: If *sources* is not iterable, an element is neither
+                :class:`str` nor :class:`bytes`, or
+                :meth:`from_ical` is given a non-bool ``local_timezones``.
+            ValueError: If *sources* is empty, a source holds more than one
+                calendar, contains components or top-level properties outside
+                the merge scope, an event lacks a non-empty ``UID``, the same
+                ``UID`` occurs in two different sources, a TZID is declared
+                more than once within one calendar, or a referenced TZID can
+                be resolved neither locally nor through the standard
+                timezone library. Error messages name the 0-based source
+                index and the offending UID/TZID/property.
+        """
+        from icalendar.cal.merge import merge_ical
+
+        return merge_ical(sources)
 
     @property
     def events(self) -> list[Event]:

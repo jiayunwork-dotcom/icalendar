@@ -9,8 +9,11 @@ from icalendar.parser.content_line import Contentline, Contentlines
 from icalendar.parser.property import split_on_unescaped_comma
 from icalendar.prop import vBroken
 from icalendar.timezone import tzp
+from icalendar.timezone.local import LocalTimezoneScope
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from icalendar.cal import Component, ComponentFactory
     from icalendar.parser.parameter import Parameters
     from icalendar.prop import VPROPERTY, TypesFactory
@@ -42,6 +45,7 @@ class ComponentIcalParser:
         data: bytes | str | list[Contentline],
         component_factory: ComponentFactory,
         types_factory: TypesFactory,
+        scope_factory: Callable[[], LocalTimezoneScope] | None = None,
     ) -> None:
         """Initialize the parser with the raw data.
 
@@ -50,11 +54,19 @@ class ComponentIcalParser:
                 or a list of content lines.
             component_factory: The factory to use for creating components.
             types_factory: The factory to use for creating property values.
+            scope_factory: When given, returns a fresh
+                :class:`~icalendar.timezone.local.LocalTimezoneScope` for each
+                top-level ``VCALENDAR`` parsed. Its ``VTIMEZONE`` components
+                stay private to that calendar. When ``None``, the parser uses
+                the global :data:`~icalendar.timezone.tzp` cache as before.
         """
         self._data = data
         self._component_factory = component_factory
         self._types_factory = types_factory
+        self._scope_factory = scope_factory
         self._tzp = tzp
+        self._scope: LocalTimezoneScope | None = None
+        self._calendar_depth = 0
 
     _content_lines: list[Contentline]
 
@@ -85,6 +97,9 @@ class ComponentIcalParser:
             else Contentlines.from_ical(self._data)
         )
         self._content_lines_iterator = iter(self._content_lines)
+        self._scope: LocalTimezoneScope | None = None
+        self._calendar_depth = 0
+        self._prepared_scopes: dict[int, LocalTimezoneScope] | None = None
 
     def handle_line_parse_error(self, exception: Exception):
         """Handle a line parsing error."""
@@ -126,6 +141,22 @@ class ComponentIcalParser:
         component = c_class()
         if not getattr(component, "name", ""):  # undefined components
             component.name = c_name
+        if (
+            self._scope_factory is not None
+            and c_name == "VCALENDAR"
+            and self._calendar_depth == 0
+        ):
+            # Every top-level VCALENDAR gets its own private scope. Nested
+            # components (VEVENT, VTIMEZONE, ...) share the scope of the
+            # calendar they belong to. The scope was created during the
+            # pre-scan so forward references resolve on this first pass.
+            index = len(self._components)
+            if self._prepared_scopes is not None and index in self._prepared_scopes:
+                self._scope = self._prepared_scopes[index]
+            else:
+                self._scope = self._scope_factory()
+            component._local_timezone_scope = self._scope  # noqa: SLF001
+            self._calendar_depth += 1
         self._stack.append(component)
 
     def handle_end_component(self, vals: str) -> None:
@@ -142,7 +173,25 @@ class ComponentIcalParser:
         else:
             self._stack[-1].add_component(component)
         if vals.upper() == "VTIMEZONE" and "TZID" in component:
-            tzp.cache_timezone_component(component)
+            if self._scope is not None:
+                # In local mode the definition was already registered into
+                # the private scope by prepare_local_scopes(); keep it out
+                # of the global cache and do not register it twice.
+                if self._prepared_scopes is None:
+                    # A VTIMEZONE parsed outside the pre-scan (for example a
+                    # sub-parser) still gets a private registration.
+                    self._scope.add_definition(component)  # type: ignore[arg-type]
+            else:
+                tzp.cache_timezone_component(component)  # type: ignore[arg-type]
+        if (
+            self._scope_factory is not None
+            and vals.upper() == "VCALENDAR"
+            and not self._stack
+        ):
+            # Leaving a top-level calendar: its scope stays attached to the
+            # component and must not leak into the next one.
+            self._scope = None
+            self._calendar_depth = 0
 
     def prepare_components(self) -> None:
         """Prepare the parsed components.
@@ -150,9 +199,79 @@ class ComponentIcalParser:
         This is called when all components are parsed.
         """
 
+    def prepare_local_scopes(self) -> None:
+        """Pre-register every VTIMEZONE into the calendar's private scope.
+
+        This runs before the main parse in local-timezone mode so that TZID
+        references resolve correctly even when the ``VTIMEZONE`` is declared
+        after the referencing component (a forward reference allowed by
+        :rfc:`5545`). Each top-level ``VCALENDAR`` is scanned independently
+        and receives its own scope.
+
+        Raises:
+            ~icalendar.timezone.local.LocalTimezoneError: On a TZID declared
+                more than once in the same calendar.
+        """
+        if self._scope_factory is None:
+            return
+        scopes: dict[int, LocalTimezoneScope] = {}
+        scope: LocalTimezoneScope | None = None
+        depth = 0
+        calendar_index = -1
+        collecting: list[Contentline] | None = None
+        tz_depth = 0
+        for line in self._content_lines:
+            if not line:
+                continue
+            upper = line.upper()
+            if upper == "BEGIN:VCALENDAR" and depth == 0:
+                depth = 1
+                calendar_index += 1
+                scope = self._scope_factory()
+                scopes[calendar_index] = scope
+                continue
+            if depth == 0:
+                continue
+            if upper == "BEGIN:VTIMEZONE":
+                # A VTIMEZONE is a direct child of the VCALENDAR.
+                collecting = [line]
+                tz_depth = 1
+                continue
+            if collecting is not None:
+                collecting.append(line)
+                if upper.startswith("BEGIN:"):
+                    tz_depth += 1
+                elif upper.startswith("END:"):
+                    tz_depth -= 1
+                    if tz_depth == 0:
+                        timezone = self._parse_vtimezone(collecting)
+                        if scope is None:  # pragma: no cover - guarded by depth
+                            msg = "VTIMEZONE found outside a VCALENDAR"
+                            raise ValueError(msg)
+                        scope.add_definition(timezone)
+                        collecting = None
+                continue
+            if upper == "END:VCALENDAR":
+                depth = 0
+                scope = None
+        self._prepared_scopes = scopes
+
+    def _parse_vtimezone(self, lines: list[Contentline]):
+        """Parse a single VTIMEZONE component without touching global state."""
+        sub_parser = type(self)(lines, self._component_factory, self._types_factory)
+        sub_parser.initialize_parsing()
+        # Give the sub-parser an isolated scope solely so its END:VTIMEZONE
+        # handling does not publish the component to the global cache. The
+        # definition is registered into the owning calendar's scope by the
+        # caller; the throw-away scope is discarded afterwards.
+        sub_parser._scope = LocalTimezoneScope()  # noqa: SLF001
+        sub_parser.parse_content_lines()
+        return sub_parser._components[0]  # noqa: SLF001
+
     def parse(self) -> list[Component]:
         """Parse the raw data."""
         self.initialize_parsing()
+        self.prepare_local_scopes()
         self.parse_content_lines()
         self.prepare_components()
         return self._components
@@ -244,9 +363,22 @@ class ComponentIcalParser:
     ):
         """Parse a property value and add it to the current component."""
         factory = self.get_factory_for_property(name, params)
+        if tzid and self._scope is not None:
+            # Resolve through the calendar's private scope before value
+            # parsing. An unresolvable TZID must surface as a ValueError even
+            # for error-tolerant components (VEVENT), so it is not part of the
+            # value-parse try/except below.
+            resolved_timezone = self._scope.resolve(tzid, property_name=name)
+        else:
+            resolved_timezone = None
         try:
             if tzid:
-                parsed_val = factory.from_ical(val, tzid)
+                if resolved_timezone is not None:
+                    # A local VTIMEZONE wins, otherwise the standard library
+                    # only; the global cache is never consulted.
+                    parsed_val = factory.from_ical(val, resolved_timezone)
+                else:
+                    parsed_val = factory.from_ical(val, tzid)
             else:
                 parsed_val = factory.from_ical(val)
         except (ValueError, TypeError) as e:

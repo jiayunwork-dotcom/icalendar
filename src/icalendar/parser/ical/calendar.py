@@ -11,6 +11,12 @@ class CalendarIcalParser(ComponentIcalParser):
 
         This handles timezone forward references.
         """
+        if self._scope_factory is not None:
+            # In local-timezone mode every VTIMEZONE was pre-registered into
+            # the calendar's private scope before parsing, so forward
+            # references already resolve on the first pass and the global
+            # cache reparse trick must not run.
+            return
         all_timezones_so_far = True
         for comp in self._components:
             for component in comp.subcomponents:

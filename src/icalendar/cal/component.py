@@ -267,6 +267,10 @@ class Component(CaselessDict):
         # set parameters here for properties that use non-default values
         self.subcomponents: list[Component] = []  # Components can be nested.
         self.errors: list[tuple[str | None, str]] = []
+        # The private time zone scope when this VCALENDAR was parsed with
+        # local_timezones=True (or returned by Calendar.merge_ical). It is
+        # declared as a property on Calendar; other components leave it None.
+        self._local_timezone_scope: Any = None
 
     def __bool__(self) -> bool:
         """Returns True, CaselessDict would return False if it had no items."""

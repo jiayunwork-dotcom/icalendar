@@ -309,8 +309,17 @@ class LazyCalendar(Calendar):
         self._subcomponents = self._subcomponents.set_components(value)
 
     @classmethod
-    def _get_ical_parser(cls, st: str | bytes) -> ComponentIcalParser:
+    def _get_ical_parser(
+        cls, st: str | bytes, *, local_timezones: bool = False
+    ) -> ComponentIcalParser:
         """Get the iCal parser for the given input string."""
+        if local_timezones:
+            raise TypeError(
+                "local_timezones=True is not supported by LazyCalendar; "
+                "use Calendar.from_ical(..., local_timezones=True), which "
+                "parses eagerly and keeps every VTIMEZONE private to its "
+                "own calendar."
+            )
         return LazyCalendarIcalParser(
             st, cls._get_component_factory(), cls.types_factory
         )
